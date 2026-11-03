@@ -1,152 +1,113 @@
 #!/usr/bin/env python3
-# developer : Hamdy Abou El Anein
-# hamdy.aea@protonmail.com
+# Developer: Hamdy Abou El Anein
+# Contact: hamdy.aea@protonmail.com
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Educational in-memory proof-of-work blockchain; not a cryptocurrency."""
+from __future__ import annotations
 
-import datetime
-import hashlib
+from datetime import datetime, timezone
+from hashlib import sha256
 import json
-from flask import Flask, jsonify,render_template, request, redirect,url_for
+from threading import Lock
+
+from flask import Flask, abort, redirect, render_template, request, url_for
 
 
 class Blockchain:
-    def __init__(self):
+    def __init__(self, difficulty: int = 4):
+        if not 1 <= difficulty <= 5:
+            raise ValueError("Difficulty must be 1..5")
+        self.difficulty = difficulty
         self.chain = []
-        self.create_block(proof = 1, previous_hash = '0')
+        self.lock = Lock()
+        self.create_block(proof=1, previous_hash="0")
 
-    def create_block(self, proof, previous_hash):
-        block = {'index': len(self.chain) + 1,
-                 'timestamp': str(datetime.datetime.now()),
-                 'proof': proof,
-                 'previous_hash': previous_hash}
+    def create_block(self, proof: int, previous_hash: str):
+        block = {
+            "index": len(self.chain) + 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "proof": proof,
+            "previous_hash": previous_hash,
+        }
         self.chain.append(block)
         return block
 
-    def get_previous_block(self):
-        return self.chain[-1]
+    @staticmethod
+    def hash(block):
+        return sha256(json.dumps(block, sort_keys=True).encode()).hexdigest()
 
-    def proof_of_work(self, previous_proof):
-        new_proof = 1
-        check_proof = False
-        while check_proof is False:
-            hash_operation = hashlib.sha256(str(new_proof**2 - previous_proof**2).encode()).hexdigest()
-            if hash_operation[:4] == '0000':
-                check_proof = True
-            else:
-                new_proof += 1
-        return new_proof
-    
-    def hash(self, block):
-        encoded_block = json.dumps(block, sort_keys = True).encode()
-        return hashlib.sha256(encoded_block).hexdigest()
-    
-    def is_chain_valid(self, chain):
-        previous_block = chain[0]
-        block_index = 1
-        while block_index < len(chain):
-            block = chain[block_index]
-            if block['previous_hash'] != self.hash(previous_block):
+    def valid_proof(self, previous: int, current: int) -> bool:
+        digest = sha256(str(current**2 - previous**2).encode()).hexdigest()
+        return digest.startswith("0" * self.difficulty)
+
+    def proof_of_work(self, previous_proof: int) -> int:
+        for candidate in range(1, 2_000_001):
+            if self.valid_proof(previous_proof, candidate):
+                return candidate
+        raise RuntimeError("Proof-of-work limit exceeded")
+
+    def mine(self):
+        with self.lock:
+            previous = self.chain[-1]
+            proof = self.proof_of_work(previous["proof"])
+            return self.create_block(proof, self.hash(previous))
+
+    def is_chain_valid(self, chain=None):
+        chain = self.chain if chain is None else chain
+        if not chain or chain[0]["previous_hash"] != "0" or chain[0]["proof"] != 1:
+            return False
+        for previous, current in zip(chain, chain[1:]):
+            if current.get("previous_hash") != self.hash(previous):
                 return False
-            previous_proof = previous_block['proof']
-            proof = block['proof']
-            hash_operation = hashlib.sha256(str(proof**2 - previous_proof**2).encode()).hexdigest()
-            if hash_operation[:4] != '0000':
+            if not self.valid_proof(previous["proof"], current["proof"]):
                 return False
-            previous_block = block
-            block_index += 1
         return True
 
 
-app = Flask(__name__)
+def create_app(blockchain=None):
+    app = Flask(__name__)
+    chain = blockchain if blockchain is not None else Blockchain()
+    app.config["BLOCKCHAIN"] = chain
 
-blockchain = Blockchain()
+    @app.route("/", methods=["GET", "POST"])
+    def index():
+        if request.method == "POST":
+            if "action1" in request.form:
+                return mine_block()
+            if "action2" in request.form:
+                return redirect(url_for("get_chain"), code=303)
+            if "action3" in request.form:
+                return redirect(url_for("is_valid"), code=303)
+        return render_template("index.html", form=None)
 
-@app.route("/", methods=['GET', 'POST'])
-def index():
-    form=None
-    if request.method == 'POST':
-        if request.form.get('action1') == 'Mine':
-            return redirect(url_for('mine_block'))
-        elif  request.form.get('action2') == 'Blockchain':
-            return redirect(url_for('get_chain'))
-        
-        elif  request.form.get('action3') == 'Validity':
-            return redirect(url_for('is_valid'))
-        elif  request.form.get('action0') == 'Home':
-            return render_template('index.html', form=form)
+    @app.route("/mine_block", methods=["GET", "POST"])
+    def mine_block():
+        if request.method == "GET":
+            return redirect(url_for("index"), code=303)
+        # This is intentionally an educational in-memory operation. Public
+        # deployments should add authentication and rate limits before use.
+        block = chain.mine()
+        return render_template("block.html", block={
+            "message": "Educational block mined (no real coins)", **block
+        })
 
-    if request.method == 'GET':
-        return render_template('index.html', form=form)
-    
-    return render_template("index.html")
+    @app.get("/get_chain")
+    def get_chain():
+        return render_template("chain.html", chain={
+            "chain": list(chain.chain), "length": len(chain.chain)
+        })
+
+    @app.get("/is_valid")
+    def is_valid():
+        return render_template("validity.html", valid={
+            "message": "The Blockchain is valid." if chain.is_chain_valid()
+            else "The Blockchain is not valid."
+        })
+
+    return app
 
 
-@app.route('/mine_block', methods = ['GET'])
-def mine_block():
-    previous_block = blockchain.get_previous_block()
-    previous_proof = previous_block['proof']
-    proof = blockchain.proof_of_work(previous_proof)
-    previous_hash = blockchain.hash(previous_block)
-    block = blockchain.create_block(proof, previous_hash)
-    response = {'message': 'Congratulations, you just mined a block!',
-                'index': block['index'],
-                'timestamp': block['timestamp'],
-                'proof': block['proof'],
-                'previous_hash': block['previous_hash']}
-    #return jsonify(response), 200
-    block = response
-    form=None
-    if request.method == 'POST':
-        if request.form.get('action1') == 'Mine':
-            return redirect(url_for('mine_block'))
-        elif  request.form.get('action2') == 'Blockchain':
-            return redirect(url_for('get_chain'))
+app = create_app()
 
-        elif  request.form.get('action3') == 'Validity':
-            return redirect(url_for('is_valid'))
-        elif  request.form.get('action0') == 'Home':
-            return render_template('index.html', form=form)
-
-    return render_template('block.html', block=block)   
- 
-@app.route('/get_chain', methods = ['GET'])
-def get_chain():
-    response = {'chain': blockchain.chain,
-                'length': len(blockchain.chain)}
-    chain = response
-    form=None
-    if request.method == 'POST':
-        if request.form.get('action1') == 'Mine':
-            return redirect(url_for('mine_block'))
-        elif  request.form.get('action2') == 'Blockchain':
-            return redirect(url_for('get_chain'))
-
-        elif  request.form.get('action3') == 'Validity':
-            return redirect(url_for('is_valid'))
-        elif  request.form.get('action0') == 'Home':
-            return render_template('index.html', form=form)
-
-    return render_template('chain.html', chain=chain)
-
-@app.route('/is_valid', methods = ['GET'])
-def is_valid():
-    is_valid = blockchain.is_chain_valid(blockchain.chain)
-    if is_valid:
-        response = {'message': 'The Blockchain is valid.'}
-    else:
-        response = {'message': 'The Blockchain is not valid.'}
-    valid = response
-    form=None
-    if request.method == 'POST':
-        if request.form.get('action1') == 'Mine':
-            return redirect(url_for('mine_block'))
-        elif  request.form.get('action2') == 'Blockchain':
-            return redirect(url_for('get_chain'))
-
-        elif  request.form.get('action3') == 'Validity':
-            return redirect(url_for('is_valid'))
-        elif  request.form.get('action0') == 'Home':
-            return render_template('index.html', form=form)
-
-    return render_template('validity.html', valid=valid)
-
-#app.run(host = '0.0.0.0', port = 5000)
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000, debug=False)
